@@ -39,5 +39,7 @@ void media_files_unlock();
 /**Call after clearing the screen: the next media_frame() reports changed, and
  * an open animation restarts from frame 0.**/
 void media_rewind();
+/**2026-11-14: suelta la animacion en RAM (hasta ~96 KB) al entrar a un modo sin imagenes.**/
+void media_release();
 
 #endif  // TVOUT_ENGINE

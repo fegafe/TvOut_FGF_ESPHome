@@ -126,7 +126,11 @@ bool CompositeNTSC::begin() {
     .dma_buf_count        = 6,
     .dma_buf_len          = SAMPLES_LINE / 2,             // frames of 2 words = one line
     .use_apll             = false,
-    .tx_desc_auto_clear   = false,
+    // 2026-11-14: true. Durante la OTA (y cualquier escritura a flash) la cache se apaga y esta
+    // tarea se detiene; con false el DMA repetia en loop las ultimas 6 lineas y la TV mostraba
+    // basura ("se vuelve loca"). Con true, si no llegan lineas el DMA manda ceros = la TV ve
+    // "sin senal"/negro un momento y vuelve sola al terminar.
+    .tx_desc_auto_clear   = true,
     .fixed_mclk           = 0,
     .mclk_multiple        = I2S_MCLK_MULTIPLE_256,
     .bits_per_chan        = I2S_BITS_PER_CHAN_DEFAULT
@@ -148,4 +152,42 @@ bool CompositeNTSC::begin() {
   /**Core 1 is ours; Arduino's WiFi/lwIP stack lives on core 0.**/
   xTaskCreatePinnedToCore(videoTask, "ntsc", 4096, this, configMAX_PRIORITIES - 1, NULL, 1);
   return true;
+}
+
+/**2026-11-14: OTA. Mientras ESPHome escribe la flash, las tareas que corren desde flash
+ * (video, modos, sonido; web solo se pausa) y el DMA del video se detienen: asi la actualizacion no se
+ * cae (el ESP32 no confirmaba "OTA ok") y la TV no muestra basura (queda sin senal).**/
+static const char *const OTA_TASKS[] = {"ntsc", "tvapp", "snd"};
+/**2026-11-14: bandera de pausa OTA. tvapp (app_loop) la mira y se suspende sola en un punto
+ * seguro, sin el mutex de flash/LittleFS tomado. La tarea "web" no se suspende nunca (podria
+ * quedar detenida con wifi_mx o el lock de lwIP tomado y colgar la OTA y el loop de ESPHome):
+ * webTask ve esta bandera y espera sola entre peticiones, sin locks tomados.**/
+volatile bool tvout_ota_hold = false;
+void tvout_ota_pause() {
+  // 2026-11-14: pausa en punto seguro (sin mutex de flash/LittleFS tomado); ntsc se suspende despues porque tvapp espera su vblank.
+  tvout_ota_hold = true;
+  TaskHandle_t coop[] = {xTaskGetHandle("tvapp")};  // 2026-11-14: "web" fuera (se pausa sola)
+  for (int i = 0; i < 30; i++) {               // como maximo ~300 ms
+    bool ok = true;
+    for (TaskHandle_t t : coop)
+      if (t && eTaskGetState(t) != eSuspended) ok = false;
+    if (ok) break;
+    vTaskDelay(pdMS_TO_TICKS(10));             // deja correr a tvapp en el nucleo 1
+  }
+  for (TaskHandle_t t : coop)                   // respaldo si alguna no llego a tiempo
+    if (t && eTaskGetState(t) != eSuspended) vTaskSuspend(t);
+  static const char *const DIRECT[] = {"ntsc", "snd"};
+  for (const char *n : DIRECT) {
+    TaskHandle_t t = xTaskGetHandle(n);
+    if (t) vTaskSuspend(t);
+  }
+  i2s_stop(I2S_NUM_0);
+}
+void tvout_ota_resume() {
+  tvout_ota_hold = false;
+  i2s_start(I2S_NUM_0);
+  for (const char *n : OTA_TASKS) {
+    TaskHandle_t t = xTaskGetHandle(n);
+    if (t) vTaskResume(t);
+  }
 }

@@ -186,3 +186,62 @@ To get more image space, shrink both app slots by the same amount in
 the firmware size that the build prints. If a future build outgrows the slots,
 make them bigger and LittleFS smaller. A partition change needs a USB flash
 and wipes LittleFS again.
+
+
+## Changelog
+
+### v2.0 (2026-11-14)
+
+Tested with **ESPHome 2026.10.2** (ESP-IDF 5.5.6 with Arduino 3.x as an IDF component). This
+release no longer compiles on older ESPHome (`min_version: 2026.10.0`).
+
+**OTA updates now complete reliably**
+- During an OTA, the video, mode, sound and web tasks pause and I2S stops
+  (`tvout_ota_pause()` / `tvout_ota_resume()` in `CompositeNTSC.cpp`). Before, the board
+  rebooted before it confirmed the upload and kept the old firmware.
+- `tvapp` suspends itself at a safe point (`tvout_ota_hold`). The web task waits on its
+  own between requests and is never suspended.
+- If the upload is aborted (`ota::OTA_ABORT`) or fails, the TV resumes by itself.
+- `tx_desc_auto_clear = true`: when lines stop arriving the TV goes black instead of
+  showing garbage.
+
+**New**
+- Mode `w` / `bano` ("bathroom"):
+  - `bath1` and `bath2` alternate every 800 ms;
+  - after 60 s, `bath3` stays on screen.
+- DVD mode faces the direction of travel. If `<name>_inv` exists, it is used while
+  moving right, the same way butterfly mode works. The stock butterfly can be uploaded as a 6-frame
+  animation, `mariposa` + `mariposa_inv`.
+- The **Play birthday** button switches to the birthday card and plays the tune. Before, it
+  only played the tune.
+
+**Fixes**
+- Sound: spinlock on the melody state, so a new melody can't be paired with the old length.
+- Intro: no longer corrupts when the image changes or is deleted mid-intro, and no longer
+  overwrites a mode requested during the intro.
+- Message mode: a message that arrives while one is being drawn is no longer lost.
+- `center_message` uses the current text size.
+- Butterfly: position is clamped when entering from DVD mode, and frames are drawn in vblank.
+- Image store:
+  - short or corrupt `.tvb` files are rejected;
+  - leftover `.part` files from interrupted uploads are removed at boot;
+  - names too long for the cache are rejected;
+  - the cache is 3 slots instead of 12 (frees about 115 KB of heap).
+- Media: `.tva` opens under the file mutex. The animation is released when entering modes
+  that don't use images (message, butterfly, cube, game).
+- Web uploads: the page sends 4800-byte chunks. With 9600 the `plain` body needed two large
+  contiguous heap blocks and sometimes failed with "bad chunk" or a connection reset.
+- Cube: precomputed sin/cos.
+- Removed the dead `bathroom()` function and fixed GCC warnings.
+
+**Config**
+- MQTT block removed (Home Assistant uses the API). `logger: WARN`.
+- Added:
+  - `sdkconfig_options`: no idle watchdog on core 1, as in the Arduino build, and legacy
+    I2S/ADC warnings silenced;
+  - `advanced`: `sram1_as_iram`, `flash_chip: generic`, `minimum_chip_revision: "3.0"`.
+- Diagnostic sensors (`Image count`, `Video field rate`) publish only on change.
+
+**Note:** the first flash from an Arduino-era or PC build to this IDF build may report
+`esp_littlefs: Corrupted dir pair` and reformat the image partition. Upload the images
+again afterwards.

@@ -25,8 +25,7 @@ static uint16_t afNext = 0xFFFF;  // frame the file position is at
 
 void media_files_lock() {
   xSemaphoreTake(fileMx, portMAX_DELAY);
-  if (af) af.close();
-  af = File();
+  if (af) af.close();   // 2026-11-14: close() ya deja el File vacio (quitado af = File(), warning de GCC)
 }
 
 void media_files_unlock() { xSemaphoreGive(fileMx); }
@@ -63,12 +62,15 @@ static bool readFrame(uint16_t i) {
 
 static bool openAnim(const char *name) {
   closeAnim();
+  // 2026-11-14: el .tva se lee bajo fileMx; si no, el commit de la web (remove/rename) choca con el FD abierto (EBUSY) y la subida se pierde
+  xSemaphoreTake(fileMx, portMAX_DELAY);
   File f = LittleFS.open(imgstore_path(name, true), "r");
-  if (!f) return false;
+  if (!f) { xSemaphoreGive(fileMx); return false; }
   uint8_t h[TVA_HDR];
   AnimHdr a;
   if (f.read(h, TVA_HDR) != TVA_HDR || !anim_parse(h, TVA_HDR, a) || f.size() < anim_total(a)) {
     f.close();
+    xSemaphoreGive(fileMx);
     return false;
   }
   A.hdr = a;
@@ -81,6 +83,7 @@ static bool openAnim(const char *name) {
     ok = (A.frame = (uint8_t *)malloc(anim_frame_bytes(a))) != nullptr;
   }
   f.close();
+  xSemaphoreGive(fileMx);
   strlcpy(A.name, name, sizeof(A.name));
   A.open = ok;
   if (!ok) { closeAnim(); return false; }
@@ -100,7 +103,12 @@ void media_rewind() {
   readFrame(0);
 }
 
+// 2026-11-14: soltar la animacion (hasta 96 KB) al pasar a un modo que no dibuja imagenes
+void media_release() { if (A.open) closeAnim(); }
+
 bool media_frame(const char *name, MediaFrame &f) {
+  // 2026-11-14: nombres mas largos que el buffer no existen en LittleFS; evita abrir el FS en cada cuadro
+  if (!name || strlen(name) >= sizeof(A.name)) return false;
   const uint32_t gen = imgstore_generation();
   const bool fresh = (gen != lastGen) || strcmp(name, lastName);
   if (gen != lastGen) closeAnim();               // file may have been replaced

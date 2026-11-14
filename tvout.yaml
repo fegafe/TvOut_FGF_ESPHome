@@ -1,7 +1,7 @@
 # TvOut FGF - ESPHome build of TvOut_FGF_ESP32.
 #
 # Same NTSC engine (GPIO25 video, GPIO32 sound, LittleFS images, upload page
-# and game on port 80); ESPHome now does WiFi, OTA, Home Assistant and MQTT.
+# and game on port 80); ESPHome now does WiFi, OTA and Home Assistant.
 #
 #   first flash (USB):   esphome run tvout.yaml --device COM6
 #   then, over the air:  esphome run tvout.yaml --device tvout-fgf.local
@@ -12,12 +12,11 @@
 esphome:
   name: tvout-fgf
   friendly_name: TvOut FGF
-  # Needs Arduino core 3.x (ledcAttach, Network, IDF 5 I2S timing), which
-  # ESPHome ships from 2025.7. Built and tested with 2026.6.5.
-  min_version: 2025.7.0
-  # This folder is in OneDrive, which locks build files and breaks ESPHome's
-  # clean step. Build somewhere OneDrive doesn't sync:
-  build_path: C:/esphome-build/tvout-fgf
+  # Needs Arduino core 3.x (ledcAttach, Network, IDF 5 I2S timing).
+  # 2026-11-14: usa APIs nuevas de ESPHome (network::IP_ADDRESS_BUFFER_SIZE, str_to,
+  # require_vfs_dir, request_wifi_scan_results); probado con 2026.10.2 (Arduino como
+  # componente de ESP-IDF 5.5).
+  min_version: 2026.10.0
 
 esp32:
   board: esp32dev
@@ -25,6 +24,22 @@ esp32:
   partitions: partitions.csv     # 2 x 1.375MB OTA slots + 1.19MB LittleFS
   framework:
     type: arduino                # Arduino 3.x: the engine uses LEDC/LittleFS/WebServer
+    # 2026-11-14: ESPHome 2026.10 compila Arduino como componente de ESP-IDF 5.5 con el
+    # sdkconfig de ESPHome. En el nucleo 1 corren el video (prioridad maxima) y tvapp (modos
+    # que nunca duermen, ej. el cubo): igual que el build de Arduino, el watchdog no vigila
+    # la tarea IDLE de ese nucleo. Los avisos del driver I2S/ADC antiguo se silencian (el
+    # video necesita el modo DAC del I2S antiguo; el driver nuevo no lo tiene).
+    sdkconfig_options:
+      CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1: n
+      CONFIG_I2S_SUPPRESS_DEPRECATE_WARN: y
+      CONFIG_ADC_SUPPRESS_DEPRECATE_WARN: y
+    advanced:
+      sram1_as_iram: true        # sugerido por ESPHome al arrancar: +40 KB de IRAM
+      # 2026-11-14: sugerido por ESPHome al arrancar: solo el driver generico de flash (libera IRAM)
+      flash_chip: generic
+      # 2026-11-14: el chip es rev >= 3.0 (log de arranque); se pone 3.0 y no 3.1 porque no se
+      # sabe si es 3.1 exacto, y una imagen con un minimo mayor al chip no arranca tras la OTA
+      minimum_chip_revision: "3.0"
 
 external_components:
   - source:
@@ -32,7 +47,7 @@ external_components:
       path: components
 
 logger:
-  level: INFO
+  level: WARN   # 2026-11-14: menos textos de log en el firmware (antes INFO)
 
 wifi:
   ssid: !secret wifi_ssid
@@ -54,57 +69,39 @@ ota:
   - platform: esphome
     password: !secret ota_password
     on_begin:
-      - lambda: id(tv).ota_begin();     # "UPDATING..." on the TV, sound off
+      - lambda: id(tv).ota_begin();     # 2026-11-14: pausa video/modos/web/sonido durante la OTA
     on_error:
-      - lambda: id(tv).set_mode("dvd");
+      - lambda: |-
+          id(tv).ota_error();
+          id(tv).set_mode("dvd");
+    # 2026-11-14: si la subida se corta (se cierra la ventana / se cae el Wi-Fi) ESPHome no llama
+    # on_error sino OTA_ABORT: sin esto la TV quedaba en negro con todo pausado hasta reiniciar.
+    on_state_change:
+      - lambda: |-
+          if (state == ota::OTA_ABORT) {
+            id(tv).ota_error();
+            id(tv).set_mode("dvd");
+          }
 
 api:
   encryption:
     key: !secret api_key
 
-# Optional: the topics the Arduino build used, so existing automations and
-# mosquitto_pub commands keep working. Delete this block if you only use
-# Home Assistant. discovery is off: HA already sees everything via the API.
-mqtt:
-  broker: !secret mqtt_broker
-  username: !secret mqtt_username
-  password: !secret mqtt_password
-  client_id: tvout-fgf
-  discovery: false
-  topic_prefix: tvout/esphome    # ESPHome's own status/entity topics
-  on_message:
-    - topic: tvout/cmd           # mode letter (a i m d b c g 3) or name
-      then:
-        - lambda: id(tv).set_mode(x);
-    - topic: tvout/msg           # text, shown centred
-      then:
-        - lambda: id(tv).show_message(x);
-    - topic: tvout/img           # LittleFS image name, shown centred
-      then:
-        - lambda: id(tv).show_image(x);
-    - topic: tvout/snd           # birthday | beep | startup | off
-      then:
-        - lambda: id(tv).play_sound(x);
+# 2026-11-14: se quito el bloque mqtt: (nada en HA usaba los topics tvout/*; HA va por la API)
+# para achicar el firmware: el espacio OTA es de 1,375 MB (partitions.csv).
 
 tvout:
   id: tv
   web_port: 80                   # upload page + /game; keep ESPHome's web_server off this port
   on_mode:
     - lambda: id(tv_mode).publish_state(x);
-    - if:
-        condition: mqtt.connected
-        then:
-          - mqtt.publish:
-              topic: tvout/state
-              payload: !lambda return id(tv).get_mode_letter();
-              retain: true
 
 select:
   - platform: template
     id: tv_mode
     name: Mode
     icon: mdi:television-classic
-    options: [intro, show, message, dvd, butterfly, cube, game, birthday]
+    options: [intro, show, message, dvd, butterfly, cube, game, birthday, bano]   # 2026-11-14: bano
     set_action:
       - lambda: id(tv).set_mode(x);
 
@@ -151,11 +148,16 @@ switch:
       - lambda: id(tv).set_trail(false);
 
 button:
+  # 2026-11-14: antes solo tocaba la melodia por el audio (GPIO32, RCA blanco) y la TV no
+  # cambiaba: sin parlante conectado parecia que no hacia nada. Ahora pone la tarjeta de
+  # cumpleanos (imagen hb_photo) y la melodia; si ya estaba en cumpleanos, repite la melodia.
   - platform: template
     name: Play birthday
     icon: mdi:cake-variant
     on_press:
-      - lambda: id(tv).play_sound("birthday");
+      - lambda: |-
+          if (id(tv).get_mode() == "birthday") id(tv).play_sound("birthday");
+          else id(tv).set_mode("birthday");   // la melodia suena sola al entrar al modo
   - platform: template
     name: Beep
     icon: mdi:volume-high
@@ -178,15 +180,24 @@ sensor:
     entity_category: diagnostic
     update_interval: 60s
     lambda: |-
+      // 2026-11-14: field_rate se mide una vez al arrancar (app.cpp); publicarlo solo una vez
+      static bool sent = false;
       float r = id(tv).get_field_rate();
-      if (r <= 0) return {};
+      if (r <= 0 || sent) return {};
+      sent = true;
       return r;
   - platform: template
     name: Image count
     icon: mdi:image-multiple
     accuracy_decimals: 0
     update_interval: 5s
-    lambda: return id(tv).get_image_count();
+    lambda: |-
+      // 2026-11-14: publica solo si cambia (como 'Images'); el API reenvia el ultimo estado al reconectar
+      static int last = -1;
+      int n = id(tv).get_image_count();
+      if (n == last) return {};
+      last = n;
+      return n;
   - platform: wifi_signal
     name: WiFi signal
     update_interval: 60s

@@ -11,6 +11,9 @@
 #include "sound.h"
 #include "webui.h"
 
+void tvout_ota_pause();   // CompositeNTSC.cpp (2026-11-14)
+void tvout_ota_resume();
+
 namespace esphome {
 namespace tvout {
 
@@ -22,7 +25,7 @@ struct ModeName {
 };
 static const ModeName MODES[] = {
     {'a', "intro"},     {'i', "show"}, {'m', "message"}, {'d', "dvd"},
-    {'b', "butterfly"}, {'c', "cube"}, {'g', "game"},    {'3', "birthday"},
+    {'b', "butterfly"}, {'c', "cube"}, {'g', "game"},    {'3', "birthday"}, {'w', "bano"},  // 2026-11-14
 };
 
 static const char *name_of(char letter) {
@@ -58,7 +61,9 @@ void TvOutComponent::wifi_portal_loop_() {
     char ip[network::IP_ADDRESS_BUFFER_SIZE] = "192.168.4.1";
     if (ap) w->wifi_soft_ap_ip().str_to(ip);
     webui_set_ap(ap, ip);
-    if (ap) ESP_LOGI(TAG, "Fallback hotspot up: WiFi setup page at http://%s/wifi", ip);
+    if (ap) {
+      ESP_LOGI(TAG, "Fallback hotspot up: WiFi setup page at http://%s/wifi", ip);
+    }
   }
 
   const uint32_t now = millis();
@@ -197,7 +202,12 @@ float TvOutComponent::get_field_rate() const { return field_rate; }
 
 void TvOutComponent::ota_begin() {
   sound_stop();
-  this->show_message("UPDATING...");
+  ESP_LOGW(TAG, "OTA: pausing video, modes, web page and sound");
+  tvout_ota_pause();
+}
+void TvOutComponent::ota_error() {
+  ESP_LOGW(TAG, "OTA failed: resuming video");
+  tvout_ota_resume();
 }
 
 }  // namespace tvout
