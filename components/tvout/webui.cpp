@@ -139,7 +139,8 @@ button:disabled{opacity:.35;cursor:default;background:#000;color:var(--ac)}
 
 
 <script>
-const MAXW=320, MAXH=240, MAXF=120, MAXB=1024*1024, CHUNK=9600;
+const MAXW=320, MAXH=240, MAXF=120, MAXB=1024*1024, CHUNK=4800;  // 2026-11-14: 9600 fallaba a veces (bad chunk / reset); el servidor acepta hasta 9600,
+// pero cada request pide 2 bloques contiguos de ~1,33xCHUNK en el heap (buffer del cuerpo + copia en String) y con 9600 a veces no caben
 let src=null;      // {frames:[canvas], delays:[ms], gif:bool} -- what was loaded
 let packed=null;   // still: .tvb bytes
 let anim=null;     // animation: {w,h,frames:[rows], delays:[ms]}
@@ -381,8 +382,14 @@ function render(){
 function b64(u8){ let s=''; for(let i=0;i<u8.length;i++) s+=String.fromCharCode(u8[i]); return btoa(s); }
 
 async function post(url,u8){
-  const r=await fetch(url,{method:'POST',body:b64(u8)});
-  if(!r.ok) throw await r.text();
+  const body=b64(u8);
+  // 2026-11-14: 503 = el ESP no tuvo heap para el cuerpo; reintentar hasta 3 veces (el .part se conserva)
+  for(let t=0;;t++){
+    const r=await fetch(url,{method:'POST',body});
+    if(r.ok) return;
+    if(r.status!==503||t>=2) throw await r.text();
+    await new Promise(z=>setTimeout(z,300));
+  }
 }
 
 async function save(n){
@@ -399,7 +406,7 @@ async function save(n){
       await post(base,h);
       const fb=anim.frames[0].length, data=new Uint8Array(fb*N);
       anim.frames.forEach((f,i)=>data.set(f,i*fb));
-      for(let pos=0;pos<data.length;pos+=CHUNK){          // <= 9600 bytes per request
+      for(let pos=0;pos<data.length;pos+=CHUNK){          // <= CHUNK bytes per request
         msg('uploading '+Math.round(100*pos/data.length)+'%');
         await post(base+'&pos='+pos,data.subarray(pos,pos+CHUNK));
       }
@@ -592,8 +599,10 @@ static void hUpload() {
     server.send(400, "text/plain", "missing name or body");
     return;
   }
-  String name = server.arg("name");
-  String b64  = server.arg("plain");
+  const String &name = server.arg("name");   // 2026-11-14: arg() devuelve una copia; la referencia solo la mantiene viva
+  const String &b64  = server.arg("plain");  // 2026-11-14: arg() devuelve copia (igual que hAnim)
+  // 2026-11-14: si el heap no tiene un bloque libre para copiar el cuerpo, WebServer deja el String vacio (length 0) aunque hasArg("plain") sea true; avisar sin tocar el .part
+  if (!b64.length()) { server.send(503, "text/plain", "sin memoria, reintentar"); return; }
 
   size_t n = b64decode(b64.c_str(), b64.length(), buf, sizeof(buf));
   if (n < 3) { server.send(400, "text/plain", "bad base64"); return; }
@@ -608,6 +617,9 @@ static void hAnim() {
     return;
   }
   const String &b64 = server.arg("plain");
+  // 2026-11-14: si el heap no tiene un bloque libre para copiar el cuerpo, WebServer deja el String vacio (length 0) aunque hasArg("plain") sea true; avisar sin tocar el .part
+  // (va antes de imgstore_anim_put para que fail() no borre el .part)
+  if (!b64.length()) { server.send(503, "text/plain", "sin memoria, reintentar"); return; }
   size_t n = b64decode(b64.c_str(), b64.length(), buf, sizeof(buf));
   String err;
   const int32_t pos = server.hasArg("pos") ? server.arg("pos").toInt() : -1;
@@ -901,8 +913,12 @@ static void hRootOrPortal() {
   else hRoot();
 }
 
+extern volatile bool tvout_ota_hold;  // CompositeNTSC.cpp (2026-11-14)
+
 static void webTask(void *) {
   for (;;) {
+    // 2026-11-14: durante la OTA la tarea se detiene aqui, entre peticiones y sin locks tomados.
+    if (tvout_ota_hold) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     server.handleClient();
     dnsPoll();
     vTaskDelay(1);

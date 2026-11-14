@@ -62,6 +62,7 @@ class TvOutComponent : public Component {
 
   /**Call from ota: on_begin -- puts "UPDATING..." on the TV and stops sound.**/
   void ota_begin();
+  void ota_error();   // 2026-11-14: reanuda el video si la OTA falla
 
   void add_on_mode_callback(std::function<void(std::string)> &&cb) { this->mode_cb_.add(std::move(cb)); }
 

@@ -25,14 +25,18 @@ static const Tone * volatile cur = nullptr;
 static volatile uint16_t cur_len = 0;
 static volatile uint32_t seq = 0;          // bumped on every new melody
 static volatile bool     busy = false;
+// 2026-11-14: cur/cur_len/seq se escriben desde tvapp, web y el loop; el spinlock evita leer un par mezclado (melodía nueva con largo viejo)
+static portMUX_TYPE snd_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void soundTask(void *) {
   uint32_t mine = 0;
   for (;;) {
     if (seq != mine) {
-      mine = seq;
-      const Tone *m = cur;
-      uint16_t n = cur_len;
+      const Tone *m; uint16_t n;
+      taskENTER_CRITICAL(&snd_mux);
+      mine = seq; m = cur; n = cur_len;
+      taskEXIT_CRITICAL(&snd_mux);
+      if (!m) n = 0;
       busy = true;
       for (uint16_t i = 0; i < n; i++) {
         if (seq != mine) break;            // superseded, drop this melody
@@ -59,16 +63,16 @@ void sound_begin() {
 }
 
 void sound_play(const Tone *m, uint16_t len) {
-  cur = m;
-  cur_len = len;
-  seq = seq + 1;                           // wakes the task, cancels any current melody
+  taskENTER_CRITICAL(&snd_mux);
+  cur = m; cur_len = len; seq = seq + 1;   // wakes the task, cancels any current melody
+  taskEXIT_CRITICAL(&snd_mux);
 }
 
 void sound_stop() {
-  cur = nullptr;
-  cur_len = 0;
-  seq = seq + 1;
-  ledcWrite(SND_PIN, 0);
+  taskENTER_CRITICAL(&snd_mux);
+  cur = nullptr; cur_len = 0; seq = seq + 1;
+  taskEXIT_CRITICAL(&snd_mux);
+  ledcWrite(SND_PIN, 0);                   // fuera del lock
   busy = false;
 }
 

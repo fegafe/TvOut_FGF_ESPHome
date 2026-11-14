@@ -42,6 +42,18 @@ bool anim_parse(const uint8_t *b, size_t len, AnimHdr &a) {
 bool imgstore_begin() {
   if (!LittleFS.begin(true)) return false;        // true = format if unmounted
   if (!LittleFS.exists(IMG_DIR)) LittleFS.mkdir(IMG_DIR);
+  // 2026-11-14: limpiar subidas .tva interrumpidas (pestaña cerrada / Wi-Fi cortado);
+  // se juntan los nombres y se borran después de cerrar el directorio.
+  std::vector<String> stale;
+  File dir = LittleFS.open(IMG_DIR);
+  if (dir) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      String fn = f.name();
+      if (fn.endsWith(".part")) stale.push_back(String(IMG_DIR "/") + fn);
+    }
+    dir.close();
+  }
+  for (const String &p : stale) LittleFS.remove(p);
   return true;
 }
 
@@ -85,6 +97,8 @@ static uint8_t *readFile(const char *name) {
   if (!buf) { f.close(); return nullptr; }
   n = f.read(buf, n);
   f.close();
+  // 2026-11-14: con cabecera extendida (buf[0]==0) info() lee 5 bytes; un .tvb truncado de 3-4 B se leia fuera del bloque
+  if (n < 3 || (buf[0] == 0 && n < 5)) { free(buf); return nullptr; }
   TVout32::BmpInfo bi = TVout32::info(buf);
   if (bi.w <= 0 || bi.h <= 0 || bi.w > LOG_W || bi.h > LOG_H ||
       n < bi.dataOff + (size_t)((bi.w + 7) / 8) * bi.h) {
@@ -94,11 +108,12 @@ static uint8_t *readFile(const char *name) {
   return buf;
 }
 
-#define CACHE_SLOTS 12
+#define CACHE_SLOTS 3   // 2026-11-14: antes 12 (hasta ~115 KB de heap en bloques de 9,6 KB); cada modo muestra una imagen a la vez y un fallo solo cuesta leer LittleFS
 static struct Slot { char name[25]; uint8_t *buf; uint32_t used; } cache[CACHE_SLOTS];
 static uint32_t cacheGen = 0, tick = 0;
 
 const uint8_t *imgstore_get(const char *name) {
+  if (!name || strlen(name) >= sizeof(cache[0].name)) return nullptr;  // 2026-11-14: nombre mas largo que el slot (safeName lo rechaza igual): no desalojar el cache ni tapar una imagen con ese prefijo
   if (cacheGen != gen) {                          // something changed on the FS
     for (Slot &c : cache) { free(c.buf); c = Slot{}; }
     cacheGen = gen;

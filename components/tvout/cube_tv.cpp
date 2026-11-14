@@ -47,23 +47,25 @@ void printcube(TVout32 &tv) {
 
 void rotate_axis(float q, char axis) {
   float tx, ty, tz, temp_x = 0, temp_y = 0, temp_z = 0;
+  // 2026-11-14: cos/sin una vez por llamada y en float (q es igual para los 8 vertices).
+  const float cq = cosf(q), sq = sinf(q);
   for (byte i = 0; i < 8; i++) {
     tx = cube3d[i][0] - xOff;
     ty = cube3d[i][1] - yOff;
     tz = cube3d[i][2] - zOff;
     if (axis == 'z') {
-      temp_x = tx * cos(q) - ty * sin(q);
-      temp_y = tx * sin(q) + ty * cos(q);
+      temp_x = tx * cq - ty * sq;
+      temp_y = tx * sq + ty * cq;
       temp_z = tz;
     }
     if (axis == 'x') {
-      temp_y = ty * cos(q) - tz * sin(q);
-      temp_z = ty * sin(q) + tz * cos(q);
+      temp_y = ty * cq - tz * sq;
+      temp_z = ty * sq + tz * cq;
       temp_x = tx;
     }
     if (axis == 'y') {
-      temp_z = tz * cos(q) - tx * sin(q);
-      temp_x = tz * sin(q) + tx * cos(q);
+      temp_z = tz * cq - tx * sq;
+      temp_x = tz * sq + tx * cq;
       temp_y = ty;
     }
     cube3d[i][0] = temp_x + xOff;
