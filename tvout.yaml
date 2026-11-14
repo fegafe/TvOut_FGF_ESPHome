@@ -1,0 +1,211 @@
+# TvOut FGF - ESPHome build of TvOut_FGF_ESP32.
+#
+# Same NTSC engine (GPIO25 video, GPIO32 sound, LittleFS images, upload page
+# and game on port 80); ESPHome now does WiFi, OTA, Home Assistant and MQTT.
+#
+#   first flash (USB):   esphome run tvout.yaml --device COM6
+#   then, over the air:  esphome run tvout.yaml --device tvout-fgf.local
+#                        (or the IP the router gave it)
+#
+# Classic ESP32 only (WROOM-32 / PICO-D4). See README.md.
+
+esphome:
+  name: tvout-fgf
+  friendly_name: TvOut FGF
+  # Needs Arduino core 3.x (ledcAttach, Network, IDF 5 I2S timing), which
+  # ESPHome ships from 2025.7. Built and tested with 2026.6.5.
+  min_version: 2025.7.0
+  # This folder is in OneDrive, which locks build files and breaks ESPHome's
+  # clean step. Build somewhere OneDrive doesn't sync:
+  build_path: C:/esphome-build/tvout-fgf
+
+esp32:
+  board: esp32dev
+  flash_size: 4MB
+  partitions: partitions.csv     # 2 x 1.375MB OTA slots + 1.19MB LittleFS
+  framework:
+    type: arduino                # Arduino 3.x: the engine uses LEDC/LittleFS/WebServer
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+  level: INFO
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:                            # fallback hotspot if the WiFi is unreachable
+    ssid: TvOut-FGF Fallback
+    password: !secret ap_password
+# No ESPHome captive_portal: it wants port 80, which the upload page uses. The
+# tvout component serves its own instead: join the hotspot and the phone pops
+# up a WiFi setup page (or open http://192.168.4.1/wifi). The SSID/password
+# entered there are saved on the board and override the ones above until the
+# next firmware with a changed config. OTA also works at 192.168.4.1.
+
+# Boot-loops (e.g. a bad build) drop into a WiFi + OTA only mode, so the board
+# can always be reflashed over the air.
+safe_mode:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+    on_begin:
+      - lambda: id(tv).ota_begin();     # "UPDATING..." on the TV, sound off
+    on_error:
+      - lambda: id(tv).set_mode("dvd");
+
+api:
+  encryption:
+    key: !secret api_key
+
+# Optional: the topics the Arduino build used, so existing automations and
+# mosquitto_pub commands keep working. Delete this block if you only use
+# Home Assistant. discovery is off: HA already sees everything via the API.
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  client_id: tvout-fgf
+  discovery: false
+  topic_prefix: tvout/esphome    # ESPHome's own status/entity topics
+  on_message:
+    - topic: tvout/cmd           # mode letter (a i m d b c g 3) or name
+      then:
+        - lambda: id(tv).set_mode(x);
+    - topic: tvout/msg           # text, shown centred
+      then:
+        - lambda: id(tv).show_message(x);
+    - topic: tvout/img           # LittleFS image name, shown centred
+      then:
+        - lambda: id(tv).show_image(x);
+    - topic: tvout/snd           # birthday | beep | startup | off
+      then:
+        - lambda: id(tv).play_sound(x);
+
+tvout:
+  id: tv
+  web_port: 80                   # upload page + /game; keep ESPHome's web_server off this port
+  on_mode:
+    - lambda: id(tv_mode).publish_state(x);
+    - if:
+        condition: mqtt.connected
+        then:
+          - mqtt.publish:
+              topic: tvout/state
+              payload: !lambda return id(tv).get_mode_letter();
+              retain: true
+
+select:
+  - platform: template
+    id: tv_mode
+    name: Mode
+    icon: mdi:television-classic
+    options: [intro, show, message, dvd, butterfly, cube, game, birthday]
+    set_action:
+      - lambda: id(tv).set_mode(x);
+
+text:
+  - platform: template
+    name: Message
+    icon: mdi:message-text
+    mode: text
+    max_length: 63
+    update_interval: 2s
+    lambda: |-
+      static std::string last = "\x01";
+      std::string s = id(tv).get_message();
+      if (s == last) return {};
+      last = s;
+      return s;
+    set_action:
+      - lambda: id(tv).show_message(x);
+
+  - platform: template
+    name: Image
+    icon: mdi:image
+    mode: text
+    max_length: 24
+    update_interval: 2s
+    lambda: |-
+      static std::string last;
+      std::string s = id(tv).get_image();
+      if (s == last) return {};
+      last = s;
+      return s;
+    set_action:
+      - lambda: id(tv).show_image(x);
+
+switch:
+  - platform: template
+    name: DVD trail
+    icon: mdi:motion
+    restore_mode: RESTORE_DEFAULT_ON   # trail on unless HA turned it off, as the Arduino build
+    lambda: return id(tv).get_trail();   # polled every loop, so web page changes show up too
+    turn_on_action:
+      - lambda: id(tv).set_trail(true);
+    turn_off_action:
+      - lambda: id(tv).set_trail(false);
+
+button:
+  - platform: template
+    name: Play birthday
+    icon: mdi:cake-variant
+    on_press:
+      - lambda: id(tv).play_sound("birthday");
+  - platform: template
+    name: Beep
+    icon: mdi:volume-high
+    on_press:
+      - lambda: id(tv).play_sound("beep");
+  - platform: template
+    name: Sound off
+    icon: mdi:volume-off
+    on_press:
+      - lambda: id(tv).play_sound("off");
+  - platform: restart
+    name: Restart
+
+sensor:
+  - platform: template
+    name: Video field rate
+    icon: mdi:sine-wave
+    unit_of_measurement: Hz
+    accuracy_decimals: 2
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      float r = id(tv).get_field_rate();
+      if (r <= 0) return {};
+      return r;
+  - platform: template
+    name: Image count
+    icon: mdi:image-multiple
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: return id(tv).get_image_count();
+  - platform: wifi_signal
+    name: WiFi signal
+    update_interval: 60s
+  - platform: uptime
+    name: Uptime
+
+text_sensor:
+  - platform: template
+    name: Images
+    icon: mdi:folder-image
+    update_interval: 5s            # cheap: re-lists only after an upload/delete
+    lambda: |-
+      static bool sent = false;    // publish once even when the list is empty
+      static std::string last;
+      std::string s = id(tv).get_image_list();
+      if (sent && s == last) return {};
+      sent = true;
+      last = s;
+      return s;
+  - platform: wifi_info
+    ip_address:
+      name: IP address
